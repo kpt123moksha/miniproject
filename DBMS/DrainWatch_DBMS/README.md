@@ -5,6 +5,7 @@ This folder contains the PostgreSQL database implementation and DBMS lab documen
 ## Folder contents
 
 - `dbms/schema.sql` — creates all tables, primary keys, foreign keys and constraints.
+- `dbms/migrations/20261120_add_completion_confirmations.sql` — adds authority/citizen completion confirmations and citizen rating fields to an existing database.
 - `dbms/sample_data.sql` — inserts demo users, ward configuration and a sample complaint.
 - `dbms/queries.sql` — 17 example SQL queries covering joins, subqueries, aggregates, grouping and window functions.
 - `dbms/views.sql` — creates reporting views.
@@ -27,7 +28,7 @@ This folder contains the PostgreSQL database implementation and DBMS lab documen
    5. `dbms/indexes.sql`
 5. Run `dbms/queries.sql` and `dbms/transactions.sql` when you want to test queries and transaction examples.
 
-Run `schema.sql` only once for a fresh database. Most objects use `IF NOT EXISTS` or `CREATE OR REPLACE`, but this is not a migration system.
+Run `schema.sql` only once for a fresh database. For an existing database, run the applicable SQL file in `dbms/migrations` before starting the updated backend. Most schema objects use `IF NOT EXISTS` or `CREATE OR REPLACE`, but this is not a migration system.
 
 ## Demo login accounts
 

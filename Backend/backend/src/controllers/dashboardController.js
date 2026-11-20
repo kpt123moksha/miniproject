@@ -11,7 +11,7 @@ async function summary(req, res, next) {
       `SELECT COUNT(*)::int AS total,
        COUNT(*) FILTER (WHERE status = 'Submitted')::int AS pending,
        COUNT(*) FILTER (WHERE status IN ('Assigned','Cleaning in Progress'))::int AS assigned,
-       COUNT(*) FILTER (WHERE status = 'Cleaning Completed')::int AS completed,
+       COUNT(*) FILTER (WHERE status = 'Verified')::int AS completed,
        COUNT(*) FILTER (WHERE risk_level IN ('High','Critical'))::int AS high_risk
        FROM complaints ${where}`,
       params
@@ -27,7 +27,7 @@ async function summary(req, res, next) {
          COUNT(c.id)::int AS total,
          COUNT(c.id) FILTER (WHERE c.status IN ('Submitted','Reopened'))::int AS pending,
          COUNT(c.id) FILTER (WHERE c.status IN ('Assigned','Cleaning in Progress'))::int AS assigned,
-         COUNT(c.id) FILTER (WHERE c.status IN ('Cleaning Completed','Verified'))::int AS completed,
+         COUNT(c.id) FILTER (WHERE c.status = 'Verified')::int AS completed,
          COUNT(t.id) FILTER (WHERE t.deadline < NOW() AND t.task_status <> 'Cleaning Completed')::int AS overdue
          FROM (VALUES ('Mangaluru'), ('Bantwal'), ('Udupi')) AS city_filter(city)
          LEFT JOIN complaints c ON c.city = city_filter.city

@@ -54,6 +54,12 @@ export interface Complaint {
   before_photo?: string;
   after_photo?: string;
   completion_description?: string;
+  task_id?: number;
+  worker_id?: number;
+  authority_confirmed?: boolean;
+  citizen_confirmed?: boolean;
+  citizen_rating?: number | null;
+  citizen_feedback?: string | null;
 }
 
 export interface WeatherData {

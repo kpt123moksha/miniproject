@@ -120,7 +120,20 @@ async function listComplaints(req, res, next) {
     const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
     const result = await pool.query(
       `SELECT c.*, u.name AS citizen_name,
-        w.name AS worker_name
+        w.name AS worker_name, t.id AS task_id, t.worker_id,
+        t.deadline, t.task_status,
+        (c.authority_confirmed_at IS NOT NULL) AS authority_confirmed,
+        (c.citizen_confirmed_at IS NOT NULL) AS citizen_confirmed,
+        c.citizen_rating, c.citizen_feedback,
+        (SELECT e.photo_url FROM cleaning_evidence e
+          WHERE e.complaint_id = c.id AND e.evidence_type = 'Before'
+          ORDER BY e.created_at DESC LIMIT 1) AS before_photo,
+        (SELECT e.photo_url FROM cleaning_evidence e
+          WHERE e.complaint_id = c.id AND e.evidence_type = 'After'
+          ORDER BY e.created_at DESC LIMIT 1) AS after_photo,
+        (SELECT e.remarks FROM cleaning_evidence e
+          WHERE e.complaint_id = c.id AND e.evidence_type = 'After'
+          ORDER BY e.created_at DESC LIMIT 1) AS completion_description
        FROM complaints c
        JOIN users u ON u.id = c.citizen_id
        LEFT JOIN cleaning_tasks t ON t.complaint_id = c.id
@@ -137,7 +150,15 @@ async function getComplaint(req, res, next) {
   try {
     const result = await pool.query(
       `SELECT c.*, u.name AS citizen_name, u.email AS citizen_email,
-       w.name AS worker_name
+       w.name AS worker_name, t.id AS task_id, t.worker_id, t.deadline, t.task_status,
+       c.authority_confirmed_at IS NOT NULL AS authority_confirmed,
+       c.citizen_confirmed_at IS NOT NULL AS citizen_confirmed,
+       (SELECT e.photo_url FROM cleaning_evidence e WHERE e.complaint_id = c.id
+        AND e.evidence_type = 'Before' ORDER BY e.created_at DESC LIMIT 1) AS before_photo,
+       (SELECT e.photo_url FROM cleaning_evidence e WHERE e.complaint_id = c.id
+        AND e.evidence_type = 'After' ORDER BY e.created_at DESC LIMIT 1) AS after_photo,
+       (SELECT e.remarks FROM cleaning_evidence e WHERE e.complaint_id = c.id
+        AND e.evidence_type = 'After' ORDER BY e.created_at DESC LIMIT 1) AS completion_description
        FROM complaints c
        JOIN users u ON u.id = c.citizen_id
        LEFT JOIN cleaning_tasks t ON t.complaint_id = c.id
@@ -147,7 +168,7 @@ async function getComplaint(req, res, next) {
     );
     const complaint = result.rows[0];
     if (!complaint) return res.status(404).json({ message: "Complaint not found." });
-    if (req.user.role === "citizen" && complaint.citizen_id !== req.user.id) {
+    if (req.user.role === "citizen" && Number(complaint.citizen_id) !== Number(req.user.id)) {
       return res.status(403).json({ message: "You cannot view this complaint." });
     }
     const history = await pool.query(
@@ -171,7 +192,7 @@ async function updateStatus(req, res, next) {
   const client = await pool.connect();
   try {
     const { status, remarks } = req.body;
-    const allowed = ["Submitted", "Assigned", "Cleaning in Progress", "Cleaning Completed", "Rejected"];
+    const allowed = ["Submitted", "Assigned", "Cleaning in Progress", "Rejected"];
     if (!allowed.includes(status)) return res.status(400).json({ message: "Invalid complaint status." });
 
     await client.query("BEGIN");
@@ -179,6 +200,10 @@ async function updateStatus(req, res, next) {
     if (!old.rows.length) {
       await client.query("ROLLBACK");
       return res.status(404).json({ message: "Complaint not found." });
+    }
+    if (["Cleaning Completed", "Verified"].includes(old.rows[0].status)) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Completion requests can only be changed through the confirmation workflow." });
     }
     const updated = await client.query(
       "UPDATE complaints SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *",
@@ -217,6 +242,10 @@ async function assignWorker(req, res, next) {
       await client.query("ROLLBACK");
       return res.status(404).json({ message: "Complaint not found." });
     }
+    if (!["Submitted", "Reopened", "Assigned", "Cleaning in Progress"].includes(complaint.rows[0].status)) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "This complaint is already awaiting confirmation or complete." });
+    }
     await client.query(
       `INSERT INTO cleaning_tasks (complaint_id, worker_id, assigned_by, deadline, task_status)
        VALUES ($1,$2,$3,$4,'Assigned')
@@ -245,13 +274,16 @@ async function assignWorker(req, res, next) {
 async function verifyComplaint(req, res, next) {
   try {
     const { accepted, remarks } = req.body;
+    if (typeof accepted !== "boolean") {
+      return res.status(400).json({ message: "Choose whether the work is complete or the problem still exists." });
+    }
     const result = await pool.query(
       "SELECT id,citizen_id,status FROM complaints WHERE id = $1",
       [req.params.id]
     );
     const complaint = result.rows[0];
     if (!complaint) return res.status(404).json({ message: "Complaint not found." });
-    if (complaint.citizen_id !== req.user.id) return res.status(403).json({ message: "Not your complaint." });
+    if (Number(complaint.citizen_id) !== Number(req.user.id)) return res.status(403).json({ message: "Not your complaint." });
     if (complaint.status !== "Cleaning Completed") {
       return res.status(400).json({ message: "This complaint is not marked as completed yet." });
     }
@@ -260,15 +292,32 @@ async function verifyComplaint(req, res, next) {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      const locked = await client.query(
+        "SELECT authority_confirmed_at FROM complaints WHERE id = $1 FOR UPDATE",
+        [req.params.id]
+      );
+      if (accepted && !locked.rows[0].authority_confirmed_at) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "The authority must confirm the work before citizen confirmation." });
+      }
       await client.query(
-        "UPDATE complaints SET status = $1, verification_remarks = $2, updated_at = NOW() WHERE id = $3",
-        [nextStatus, remarks || null, req.params.id]
+        `UPDATE complaints SET status = $1::varchar,
+         citizen_confirmed_at = CASE WHEN $2::boolean THEN NOW() ELSE NULL END,
+         authority_confirmed_at = CASE WHEN $3::boolean THEN NULL ELSE authority_confirmed_at END,
+         verification_remarks = $4::text, updated_at = NOW() WHERE id = $5::bigint`,
+        [nextStatus, accepted, !accepted, remarks || null, req.params.id]
       );
       await client.query(
         `INSERT INTO complaint_status_history (complaint_id, changed_by, old_status, new_status, remarks)
-         VALUES ($1,$2,'Cleaning Completed',$3,$4)`,
+         VALUES ($1::bigint,$2::bigint,'Cleaning Completed',$3::varchar,$4::text)`,
         [req.params.id, req.user.id, nextStatus, remarks || null]
       );
+      if (!accepted) {
+        await client.query(
+          "UPDATE cleaning_tasks SET task_status = 'Cleaning in Progress', updated_at = NOW() WHERE complaint_id = $1",
+          [req.params.id]
+        );
+      }
       await client.query("COMMIT");
     } catch (e) {
       await client.query("ROLLBACK");
@@ -278,11 +327,145 @@ async function verifyComplaint(req, res, next) {
   } catch (error) { next(error); }
 }
 
+async function confirmByAuthority(req, res, next) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      "SELECT id, status, authority_confirmed_at FROM complaints WHERE id = $1 FOR UPDATE",
+      [req.params.id]
+    );
+    if (!result.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Complaint not found." });
+    }
+    if (result.rows[0].status !== "Cleaning Completed") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "The worker must submit completion photos before authority confirmation." });
+    }
+    const evidence = await client.query(
+      `SELECT COUNT(DISTINCT evidence_type)::int AS photo_types FROM cleaning_evidence
+       WHERE complaint_id = $1 AND evidence_type IN ('Before','After')`,
+      [req.params.id]
+    );
+    if (evidence.rows[0].photo_types !== 2) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Both before and after photos are required before confirmation." });
+    }
+    if (result.rows[0].authority_confirmed_at) {
+      await client.query("COMMIT");
+      return res.json({ message: "Completion is already confirmed by the authority." });
+    }
+    const confirmation = await client.query(
+      `UPDATE complaints SET authority_confirmed_at = COALESCE(authority_confirmed_at, NOW()),
+       updated_at = NOW() WHERE id = $1 RETURNING authority_confirmed_at`,
+      [req.params.id]
+    );
+    await client.query(
+      `INSERT INTO complaint_status_history (complaint_id, changed_by, old_status, new_status, remarks)
+       VALUES ($1,$2,'Cleaning Completed','Cleaning Completed','Authority confirmed completion')`,
+      [req.params.id, req.user.id]
+    );
+    await client.query("COMMIT");
+    res.json({ message: "Completion confirmed. Waiting for the citizen.", authority_confirmed_at: confirmation.rows[0].authority_confirmed_at });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    next(error);
+  } finally { client.release(); }
+}
+
+async function completeTask(req, res, next) {
+  const client = await pool.connect();
+  try {
+    const files = req.files || {};
+    const beforePhoto = files.beforePhoto && files.beforePhoto[0];
+    const afterPhoto = files.afterPhoto && files.afterPhoto[0];
+    if (!beforePhoto || !afterPhoto) {
+      return res.status(400).json({ message: "Please upload both before and after photos." });
+    }
+    const description = typeof req.body.completionDescription === "string"
+      ? req.body.completionDescription.trim()
+      : "";
+    if (!description) return res.status(400).json({ message: "Describe the completed work." });
+
+    await client.query("BEGIN");
+    const task = await client.query(
+      `SELECT t.id, t.worker_id, t.task_status, c.status AS complaint_status
+       FROM cleaning_tasks t JOIN complaints c ON c.id = t.complaint_id
+       WHERE c.id = $1 FOR UPDATE`,
+      [req.params.id]
+    );
+    if (!task.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Assigned task not found." });
+    }
+    if (Number(task.rows[0].worker_id) !== Number(req.user.id)) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ message: "This task is not assigned to you." });
+    }
+    if (["Verified", "Cleaning Completed"].includes(task.rows[0].complaint_status)) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "A completion request is already awaiting confirmation or this complaint is complete." });
+    }
+
+    for (const [evidenceType, file, remarks] of [
+      ["Before", beforePhoto, null],
+      ["After", afterPhoto, description]
+    ]) {
+      await client.query(
+        `INSERT INTO cleaning_evidence (complaint_id, uploaded_by, evidence_type, photo_url, remarks)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [req.params.id, req.user.id, evidenceType, `/uploads/${file.filename}`, remarks]
+      );
+    }
+    await client.query(
+      `UPDATE cleaning_tasks SET task_status = 'Cleaning Completed', remarks = $1, updated_at = NOW()
+       WHERE id = $2`,
+      [description, task.rows[0].id]
+    );
+    await client.query(
+      `UPDATE complaints SET status = 'Cleaning Completed', authority_confirmed_at = NULL,
+       citizen_confirmed_at = NULL, updated_at = NOW() WHERE id = $1`,
+      [req.params.id]
+    );
+    await client.query(
+      `INSERT INTO complaint_status_history (complaint_id, changed_by, old_status, new_status, remarks)
+       VALUES ($1,$2,$3,'Cleaning Completed','Worker submitted completion photos')`,
+      [req.params.id, req.user.id, task.rows[0].complaint_status]
+    );
+    await client.query("COMMIT");
+    res.status(201).json({ message: "Completion submitted for authority and citizen confirmation." });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    next(error);
+  } finally { client.release(); }
+}
+
+async function rateCompletion(req, res, next) {
+  try {
+    const rating = Number(req.body.rating);
+    const feedback = typeof req.body.feedback === "string" ? req.body.feedback.trim() : "";
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ message: "Rating must be between 1 and 5." });
+    }
+    const result = await pool.query(
+      `UPDATE complaints SET citizen_rating = $1, citizen_feedback = $2, updated_at = NOW()
+       WHERE id = $3 AND citizen_id = $4 AND status = 'Verified' AND citizen_rating IS NULL
+       RETURNING id`,
+      [rating, feedback || null, req.params.id, req.user.id]
+    );
+    if (!result.rows.length) {
+      return res.status(400).json({ message: "Rating is available only after both confirmations and can be submitted once." });
+    }
+    res.json({ message: "Thank you for rating the completed work." });
+  } catch (error) { next(error); }
+}
+
 async function updateTaskStatus(req, res, next) {
   const client = await pool.connect();
   try {
     const { task_status, remarks } = req.body;
-    const allowed = ["Assigned", "Cleaning in Progress", "Cleaning Completed"];
+    const allowed = ["Assigned", "Cleaning in Progress"];
     if (!allowed.includes(task_status)) return res.status(400).json({ message: "Invalid task status." });
 
     await client.query("BEGIN");
@@ -295,9 +478,14 @@ async function updateTaskStatus(req, res, next) {
       await client.query("ROLLBACK");
       return res.status(404).json({ message: "Task not found." });
     }
-    if (req.user.role === "worker" && task.rows[0].worker_id !== req.user.id) {
+    if (req.user.role === "worker" && Number(task.rows[0].worker_id) !== Number(req.user.id)) {
       await client.query("ROLLBACK");
       return res.status(403).json({ message: "This task is not assigned to you." });
+    }
+    if (["Cleaning Completed", "Verified"].includes(task.rows[0].complaint_status) ||
+        (task.rows[0].task_status === "Cleaning in Progress" && task_status === "Assigned")) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "This task can no longer be moved to the selected status." });
     }
     await client.query(
       "UPDATE cleaning_tasks SET task_status = $1, remarks = $2, updated_at = NOW() WHERE id = $3",
@@ -342,5 +530,6 @@ async function addEvidence(req, res, next) {
 
 module.exports = {
   createComplaint, listComplaints, getComplaint, updateStatus,
-  assignWorker, verifyComplaint, updateTaskStatus, addEvidence
+  assignWorker, verifyComplaint, confirmByAuthority, completeTask, rateCompletion,
+  updateTaskStatus, addEvidence
 };

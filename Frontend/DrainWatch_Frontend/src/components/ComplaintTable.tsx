@@ -12,7 +12,9 @@ export default function ComplaintTable({items,onSelect}:Props) {
       <td>{item.location_name || 'Citizen location'}</td>
       <td className="capitalize">{item.severity}</td>
       <td><RiskBadge category={item.risk_category} score={item.risk_score}/></td>
-      <td>{item.status}</td>
+      <td>{item.status==='Cleaning Completed'
+        ?item.authority_confirmed?'Awaiting citizen confirmation':'Awaiting authority confirmation'
+        :item.status}</td>
       <td>{new Date(item.created_at).toLocaleDateString()}</td>
       <td><button className="text-button" onClick={()=>onSelect?.(item)}>View</button></td>
     </tr>)}</tbody>

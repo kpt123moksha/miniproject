@@ -17,12 +17,22 @@ interface ApiComplaint {
   risk_score: number | null;
   risk_level: string | null;
   status: string;
+  task_id?: number;
+  worker_id?: number;
+  deadline?: string;
+  task_status?: string;
+  worker_name?: string;
+  before_photo?: string | null;
+  after_photo?: string | null;
+  completion_description?: string | null;
+  authority_confirmed?: boolean;
+  citizen_confirmed?: boolean;
+  citizen_rating?: number | null;
+  citizen_feedback?: string | null;
 }
 
-async function getComplaints(city?: ServiceCity) {
-  const path = city ? `/complaints?city=${encodeURIComponent(city)}` : '/complaints';
-  const result = await api<{ complaints: ApiComplaint[] }>(path);
-  return result.complaints.map((item): Complaint => ({
+function mapComplaint(item: ApiComplaint): Complaint {
+  return {
     complaint_id: item.id,
     city: item.city,
     citizen_id: item.citizen_id,
@@ -38,8 +48,26 @@ async function getComplaints(city?: ServiceCity) {
     forecast_rainfall_mm: item.rainfall_mm,
     risk_score: item.risk_score,
     risk_category: item.risk_level,
-    cleaning_priority: null
-  }));
+    cleaning_priority: null,
+    task_id: item.task_id,
+    worker_id: item.worker_id,
+    deadline: item.deadline,
+    task_status: item.task_status,
+    worker_name: item.worker_name,
+    before_photo: item.before_photo || undefined,
+    after_photo: item.after_photo || undefined,
+    completion_description: item.completion_description || undefined,
+    authority_confirmed: item.authority_confirmed,
+    citizen_confirmed: item.citizen_confirmed,
+    citizen_rating: item.citizen_rating,
+    citizen_feedback: item.citizen_feedback
+  };
+}
+
+async function getComplaints(city?: ServiceCity) {
+  const path = city ? `/complaints?city=${encodeURIComponent(city)}` : '/complaints';
+  const result = await api<{ complaints: ApiComplaint[] }>(path);
+  return result.complaints.map(mapComplaint);
 }
 
 export function getMyComplaints() {
@@ -99,7 +127,14 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
 }
 
 export function getWorkers() {
-  return api<Worker[]>('/tasks/workers');
+  return api<{workers:Array<{id:number;name:string;phone:string|null}>}>('/workers')
+    .then(result=>result.workers.map((worker):Worker=>({
+      user_id:worker.id,name:worker.name,phone:worker.phone
+    })));
+}
+
+export function getMyTasks() {
+  return api<{tasks:ApiComplaint[]}>('/workers/me/tasks').then(result=>result.tasks.map(mapComplaint));
 }
 
 export function analyzeComplaintImage(photo: File) {
@@ -132,29 +167,39 @@ export function updateComplaintStatus(id:number,status:string) {
 }
 
 export function assignWorker(id:number,workerId:number,deadline:string) {
-  return api(`/tasks/${id}/assign`, {
-    method:'POST',body:JSON.stringify({workerId,deadline})
+  return api(`/complaints/${id}/assign`, {
+    method:'POST',body:JSON.stringify({worker_id:workerId,deadline})
   });
 }
 
 export function verifyCleaning(id:number,resolved:boolean,feedback:string) {
   return api(`/complaints/${id}/verify`, {
-    method:'POST',body:JSON.stringify({resolved,feedback})
+    method:'POST',body:JSON.stringify({accepted:resolved,remarks:feedback})
   });
 }
 
 export function updateTaskStatus(taskId:number,taskStatus:string) {
-  return api(`/tasks/${taskId}/status`, {
-    method:'PATCH',body:JSON.stringify({taskStatus})
+  return api(`/complaints/tasks/${taskId}/status`, {
+    method:'PATCH',body:JSON.stringify({task_status:taskStatus})
   });
 }
 
-export function uploadCleaningEvidence(taskId:number,input:{
-  beforePhoto?:File;afterPhoto?:File;completionDescription:string
+export function confirmAuthority(id:number) {
+  return api(`/complaints/${id}/authority-confirm`,{method:'POST'});
+}
+
+export function rateCompletion(id:number,rating:number,feedback:string) {
+  return api(`/complaints/${id}/rating`,{
+    method:'POST',body:JSON.stringify({rating,feedback})
+  });
+}
+
+export function uploadTaskCompletion(complaintId:number,input:{
+  beforePhoto:File;afterPhoto:File;completionDescription:string
 }) {
   const body = new FormData();
-  if (input.beforePhoto) body.append('beforePhoto',input.beforePhoto);
-  if (input.afterPhoto) body.append('afterPhoto',input.afterPhoto);
+  body.append('beforePhoto',input.beforePhoto);
+  body.append('afterPhoto',input.afterPhoto);
   body.append('completionDescription',input.completionDescription);
-  return api(`/tasks/${taskId}/evidence`,{method:'POST',body});
+  return api(`/complaints/${complaintId}/complete`,{method:'POST',body});
 }

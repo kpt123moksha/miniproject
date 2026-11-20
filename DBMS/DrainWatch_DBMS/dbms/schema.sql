@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS complaints (
         CHECK (status IN ('Submitted', 'Assigned', 'Cleaning in Progress',
                           'Cleaning Completed', 'Verified', 'Reopened', 'Rejected')),
     verification_remarks TEXT,
+    authority_confirmed_at TIMESTAMPTZ,
+    citizen_confirmed_at TIMESTAMPTZ,
+    citizen_rating SMALLINT CHECK (citizen_rating IS NULL OR citizen_rating BETWEEN 1 AND 5),
+    citizen_feedback TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
